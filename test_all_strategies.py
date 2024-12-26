@@ -5,6 +5,8 @@ from strategies.swing_strategy import SwingStrategy
 from strategies.scalping_strategy import ScalpingStrategy
 from strategies.market_sentiment import MarketSentimentStrategy
 from strategies.ml_strategy import MLStrategy
+from strategies.combined_strategy import calculate_combined_signals, calculate_funding_rate_change, calculate_oi_change
+from backtester.engine import BacktestEngine
 
 def load_test_data(days: int = 30) -> pd.DataFrame:
     """테스트 데이터 생성"""
@@ -19,11 +21,13 @@ def load_test_data(days: int = 30) -> pd.DataFrame:
     # OHLCV 데이터
     df = pd.DataFrame({
         'timestamp': dates,
-        'open': prices + np.random.normal(0, 10, periods),
+        'open': prices,
         'high': prices + np.abs(np.random.normal(0, 20, periods)),
         'low': prices - np.abs(np.random.normal(0, 20, periods)),
-        'close': prices + np.random.normal(0, 10, periods),
-        'volume': np.abs(np.random.normal(100, 30, periods))
+        'close': prices,
+        'volume': np.abs(np.random.normal(100, 30, periods)),
+        'fundingRate': np.random.normal(0, 0.001, periods),
+        'sumOpenInterest': np.abs(np.random.normal(100000, 1000, periods).cumsum())
     })
     
     # 펀딩비율 생성 (8시간마다 업데이트, -0.01 ~ 0.01 범위)
@@ -66,10 +70,15 @@ def test_all_strategies():
         'bb_period': 20,
         'bb_std': 2.0,
         'volume_ma_period': 20,
-        'volume_mult': 2.0
+        'volume_mult': 2.0,
+        'atr_period': 14
     }
     scalp = ScalpingStrategy(scalp_params)
-    scalp_results = scalp.generate_signals(df)
+    scalp_results = scalp.generate_signals(df.copy())
+    
+    # 5. 결합 전략
+    print("\n5. 결합 전략 테스트")
+    combined_signals = calculate_combined_signals(df.copy(), swing.generate_signals, scalp.generate_signals)
     
     # 3. 시장 심리 전략
     print("\n3. 시장 심리 전략 테스트")
@@ -92,6 +101,15 @@ def test_all_strategies():
     ml = MLStrategy(ml_params)
     ml_results = ml.generate_signals(df)
     
+    # 펀딩비 및 OI 변화율 테스트
+    print("\n6. 펀딩비 및 OI 변화율 테스트")
+    funding_rate_change = calculate_funding_rate_change(df)
+    oi_change = calculate_oi_change(df)
+    print("\n펀딩비 변화율:")
+    print(funding_rate_change.head())
+    print("\nOI 변화율:")
+    print(oi_change.head())
+    
     # 결과 통합
     results = pd.DataFrame({
         'swing_signal': swing_results['signal'],
@@ -101,17 +119,19 @@ def test_all_strategies():
         'sentiment_signal': sentiment_results['signal'],
         'sentiment_score': sentiment_results['score'],
         'ml_signal': ml_results['signal'],
-        'ml_score': ml_results['score']
+        'ml_score': ml_results['score'],
+        'combined_signal': combined_signals['signal'],
+        'combined_score': combined_signals['score']
     })
     
     # 결과 분석
     print("\n=== 전략별 시그널 분포 ===")
-    for col in ['swing_signal', 'scalp_signal', 'sentiment_signal', 'ml_signal']:
+    for col in ['swing_signal', 'scalp_signal', 'sentiment_signal', 'ml_signal', 'combined_signal']:
         print(f"\n{col}:")
         print(results[col].value_counts())
     
     print("\n=== 전략별 점수 통계 ===")
-    score_cols = ['swing_score', 'scalp_score', 'sentiment_score', 'ml_score']
+    score_cols = ['swing_score', 'scalp_score', 'sentiment_score', 'ml_score', 'combined_score']
     print(results[score_cols].describe())
     
     # 결과 저장

@@ -74,6 +74,35 @@ def test_indicators():
     output_file = 'data/test_indicators.csv'
     df_with_indicators.to_csv(output_file)
     print(f"\n테스트 데이터를 {output_file}에 저장했습니다.")
+    print(f"\n테스트 데이터를 {output_file}에 저장했습니다.")
+
+def test_backtest_engine():
+    """백테스트 엔진 테스트"""
+    print("\n=== 백테스트 엔진 테스트 ===")
+    
+    # 샘플 데이터 생성
+    df = create_sample_data(300)
+    
+    # 간단한 매수/매도 전략 (예시)
+    class DummyStrategy:
+        def generate_signals(self, df):
+            df['signal'] = np.where(df['close'] > df['open'], 'BUY', 'SELL')
+            return df
+
+    # 백테스트 엔진 초기화
+    from backtester.engine import BacktestEngine
+    strategy = DummyStrategy()
+    engine = BacktestEngine(strategy)
+    
+    # 백테스트 실행
+    result_df = engine.run(df)
+    
+    print("\n백테스트 결과:")
+    print(result_df.tail())
+    
+    # 트레이드 요약 출력
+    engine.summary()
 
 if __name__ == "__main__":
     test_indicators()
+    test_backtest_engine()

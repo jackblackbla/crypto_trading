@@ -76,23 +76,23 @@ class BinanceFundingOIClient:
             return False
     
     def save_to_csv(self, df: pd.DataFrame, symbol: str, data_type: str) -> None:
-        """데이터를 CSV로 저장"""
+        """데이터를 CSV로 저장."""
         if df.empty:
-            print("[Warning] DataFrame이 비어있습니다. 저장을 건너뜁니다.")
+            print(f"[Warning] {symbol} {data_type} DataFrame이 비어있습니다. 저장을 건너뜁니다.")
             return
-            
+
         # data 디렉토리가 없으면 생성
         os.makedirs('data', exist_ok=True)
-        
+
         start_date = df['timestamp'].min().strftime("%Y%m%d")
         end_date = df['timestamp'].max().strftime("%Y%m%d")
-        
+
         filename = f"data/{symbol}_{data_type}_{start_date}_{end_date}.csv"
         df.to_csv(filename, index=False)
-        print(f"[Info] 데이터 저장 완료: {filename}")
+        print(f"[Info] {symbol} {data_type} 데이터 저장 완료: {filename}")
     
-    def fetch_funding_rate(self, 
-                         symbol: str = "BTCUSDT",
+    def fetch_funding_rate(self,
+                         symbol: str,
                          start_time: Optional[int] = None,
                          end_time: Optional[int] = None,
                          limit: int = 1000,
@@ -146,76 +146,114 @@ class BinanceFundingOIClient:
                                end_time: Optional[int] = None,
                                limit: int = 500,
                                save_csv: bool = True) -> pd.DataFrame:
-        """미결제약정(OI) 데이터를 가져옵니다."""
+        """미결제약정(OI) 데이터를 가져옵니다 (기간 분할)."""
         endpoint = f"{self.base_url}/futures/data/openInterestHist"
+        all_data = []
         
-        params = {
-            "symbol": symbol,
-            "period": period,
-            "limit": limit
-        }
-        if start_time:
-            params["startTime"] = start_time
-        if end_time:
-            params["endTime"] = end_time
+        if start_time and end_time:
+            current_start_ms = start_time
+            chunk_size_ms = 3 * 24 * 60 * 60 * 1000  # 3일
             
-        try:
-            response = requests.get(endpoint, params=params)
-            data = self._handle_response(response)
-            
-            if not data:
-                print("[Warning] 데이터가 없습니다.")
-                return pd.DataFrame()
-            
-            # DataFrame 변환 및 전처리
-            df = pd.DataFrame(data)
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            df['sumOpenInterest'] = df['sumOpenInterest'].astype(float)
-            df['sumOpenInterestValue'] = df['sumOpenInterestValue'].astype(float)
-            df = df.sort_values('timestamp').reset_index(drop=True)
-            
-            # 데이터 검증
-            if not self.validate_oi_data(df, period):
-                print("[Warning] 데이터 검증 실패. 저장을 건너뜁니다.")
-                return pd.DataFrame()
-            
-            # CSV 저장
-            if save_csv:
-                self.save_to_csv(df, symbol, f'oi_{period}')
+            while current_start_ms < end_time:
+                current_end_ms = min(current_start_ms + chunk_size_ms, end_time)
                 
-            return df
-            
-        except Exception as e:
-            print(f"[Error] OI 데이터 수집 실패: {e}")
+                params = {
+                    "symbol": symbol,
+                    "period": period,
+                    "limit": limit,
+                    "startTime": current_start_ms,
+                    "endTime": current_end_ms
+                }
+                
+                print(f"OI 요청 파라미터: {params}")
+                try:
+                    response = requests.get(endpoint, params=params)
+                    response.raise_for_status()
+                    data = response.json()
+                    if data:
+                        all_data.extend(data)
+                except requests.exceptions.HTTPError as e:
+                    print(f"[Error] OI 데이터 수집 실패 ({datetime.fromtimestamp(current_start_ms / 1000)} ~ {datetime.fromtimestamp(current_end_ms / 1000)}): {e}")
+                    #return pd.DataFrame() # 임시 주석 처리
+                
+                current_start_ms = current_end_ms
+                time.sleep(1)  # API 부하 방지
+        else:
+            params = {
+                "symbol": symbol,
+                "period": period,
+                "limit": limit
+            }
+            try:
+                response = requests.get(endpoint, params=params)
+                response.raise_for_status()
+                data = response.json()
+                if data:
+                    all_data.extend(data)
+            except requests.exceptions.HTTPError as e:
+                print(f"[Error] OI 데이터 수집 실패: {e}")
+                return pd.DataFrame()
+        
+        if not all_data:
+            print("[Warning] OI 데이터가 없습니다.")
             return pd.DataFrame()
+        
+        # DataFrame 변환 및 전처리
+        df = pd.DataFrame(all_data)
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df['sumOpenInterest'] = df['sumOpenInterest'].astype(float)
+        df['sumOpenInterestValue'] = df['sumOpenInterestValue'].astype(float)
+        df = df.sort_values('timestamp').reset_index(drop=True)
+        
+        # 데이터 검증
+        if not self.validate_oi_data(df, period):
+            print("[Warning] OI 데이터 검증 실패. 저장을 건너뜁니다.")
+            return pd.DataFrame()
+        
+        # CSV 저장
+        if save_csv:
+            self.save_to_csv(df, symbol, f'oi_{period}')
+        
+        return df
             
     def collect_historical_data(self,
-                              symbol: str = "BTCUSDT",
-                              start_date: datetime = None,
-                              end_date: datetime = None,
-                              interval_days: int = 7) -> None:
+                                symbols: list,
+                                start_date: datetime = None,
+                                end_date: datetime = None) -> pd.DataFrame:
         """특정 기간의 펀딩비율과 OI 데이터를 수집합니다."""
+        funding_dataframes = []
+        if not symbols:
+            print("[Warning] 수집할 심볼이 없습니다.")
+            return pd.DataFrame()
+
+        today = datetime.now().date()
+        if start_date and (today - start_date.date()).days > 30:
+            print(f"[Info] {start_date.strftime('%Y-%m-%d')}는 현재 날짜로부터 30일 이전이므로 OI 데이터 수집을 건너뜁니다.")
+            return pd.DataFrame()
+
         if not start_date:
-            start_date = datetime.now() - timedelta(days=30)
+            start_date = today - timedelta(days=30)
         if not end_date:
-            end_date = datetime.now()
+            end_date = today
             
-        current_start = start_date
-        while current_start < end_date:
-            current_end = min(current_start + timedelta(days=interval_days), end_date)
+        start_ms = int(start_date.timestamp() * 1000)
+        end_ms = int(end_date.timestamp() * 1000)
             
-            start_ms = int(current_start.timestamp() * 1000)
-            end_ms = int(current_end.timestamp() * 1000)
-            
-            print(f"\n수집 기간: {current_start} ~ {current_end}")
-            
+        for symbol in symbols:
+            print(f"\n수집 기간: {start_date} ~ {end_date}, 심볼: {symbol}")
+
             # 펀딩비율 수집
             df_funding = self.fetch_funding_rate(
                 symbol=symbol,
                 start_time=start_ms,
                 end_time=end_ms
             )
-            print(f"펀딩비율 데이터: {len(df_funding)}행")
+            if not df_funding.empty:
+                self.save_to_csv(df_funding, symbol, 'funding_rate')
+                print(f"{symbol} 펀딩비율 데이터 저장 완료: {len(df_funding)} 행")
+                funding_dataframes.append(df_funding)
+            else:
+                print(f"{symbol} 펀딩비율 데이터 fetching 실패")
             
             # OI 수집
             df_oi = self.fetch_open_interest_hist(
@@ -224,7 +262,11 @@ class BinanceFundingOIClient:
                 start_time=start_ms,
                 end_time=end_ms
             )
-            print(f"OI 데이터: {len(df_oi)}행")
+            print(f"{symbol} OI 데이터: {len(df_oi)}행")
             
-            current_start = current_end
-            time.sleep(1)  # API 부하 방지
+        time.sleep(1)  # API 부하 방지
+        
+        if funding_dataframes:
+            return pd.concat(funding_dataframes, ignore_index=True)
+        else:
+            return pd.DataFrame()

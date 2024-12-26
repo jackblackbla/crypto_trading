@@ -65,65 +65,88 @@ class BinanceClient:
         df.to_csv(filename, index=False)
         print(f"[Info] 데이터 저장 완료: {filename}")
         
-    def fetch_klines(self, 
+    def fetch_klines(self,
                     symbol: str = "BTCUSDT",
                     interval: str = "5m",
                     start: Optional[int] = None,
                     end: Optional[int] = None,
-                    limit: int = 1000,
+                    limit: int = 1000, # limit 매개변수 추가
                     save_csv: bool = True) -> pd.DataFrame:
-        """OHLCV 데이터를 가져옵니다."""
+        """OHLCV 데이터를 지정된 기간 동안 모두 가져옵니다."""
         endpoint = f"{self.base_url}/fapi/v1/klines"
-        
-        params: Dict[str, Any] = {
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit
-        }
-        
-        if start:
-            params["startTime"] = start
-        if end:
-            params["endTime"] = end
-            
-        try:
-            response = requests.get(endpoint, params=params)
-            data = self._handle_response(response)
-            
-            # 응답 데이터를 데이터프레임으로 변환
-            df = pd.DataFrame(data, columns=[
-                'timestamp', 'open', 'high', 'low', 'close', 'volume',
-                'close_time', 'quote_volume', 'trades_count',
-                'taker_buy_volume', 'taker_buy_quote_volume', 'ignore'
-            ])
-            
-            # 데이터 타입 변환
-            numeric_columns = [
-                'open', 'high', 'low', 'close', 'volume',
-                'quote_volume', 'taker_buy_volume', 'taker_buy_quote_volume'
-            ]
-            
-            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-            for col in numeric_columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        all_klines = []
+        current_start = start
+
+        while True:
+            params: Dict[str, Any] = {
+                "symbol": symbol,
+                "interval": interval,
+                "limit": limit,
+                "startTime": current_start
+            }
+            if end:
+                params["endTime"] = end
+
+            try:
+                response = requests.get(endpoint, params=params)
+                data = self._handle_response(response)
+                if not data:
+                    break  # 더 이상 데이터가 없으면 종료
+
+                # 응답 데이터를 데이터프레임으로 변환
+                df = pd.DataFrame(data, columns=[
+                    'timestamp', 'open', 'high', 'low', 'close', 'volume',
+                    'close_time', 'quote_volume', 'trades_count',
+                    'taker_buy_volume', 'taker_buy_quote_volume', 'ignore'
+                ])
+
+                # 데이터 타입 변환
+                numeric_columns = [
+                    'open', 'high', 'low', 'close', 'volume',
+                    'quote_volume', 'taker_buy_volume', 'taker_buy_quote_volume'
+                ]
+
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+                for col in numeric_columns:
+                    df[col] = pd.to_numeric(df[col], errors='coerce')
+
+                # 불필요한 컬럼 제거
+                df = df.drop(['close_time', 'ignore'], axis=1)
+
+                # 데이터 검증
+                if not self.validate_data(df):
+                    raise Exception("데이터 검증 실패")
+
+                all_klines.append(df)
+
+                # 다음 요청을 위한 시작 시간 업데이트
+                current_start = int(df['timestamp'].max().timestamp() * 1000) + 1
                 
-            # 불필요한 컬럼 제거
-            df = df.drop(['close_time', 'ignore'], axis=1)
-            
-            # 데이터 검증
-            if not self.validate_data(df):
-                raise Exception("데이터 검증 실패")
-                
+                # 요청 간 딜레이 추가 (선택 사항)
+                time.sleep(0.1)
+
+                if end and current_start > end:
+                    break
+
+            except Exception as e:
+                print(f"[Error] 데이터 수집 실패: {e}")
+                break
+
+        if all_klines:
+            combined_df = pd.concat(all_klines).drop_duplicates(subset=['timestamp']).sort_values('timestamp').reset_index(drop=True)
             # CSV 저장 (옵션)
             if save_csv:
-                self.save_to_csv(df, symbol, interval, 'klines')
-                
-            return df
-            
-        except Exception as e:
-            print(f"[Error] 데이터 수집 실패: {e}")
+                start_dt = combined_df['timestamp'].min()
+                end_dt = combined_df['timestamp'].max()
+                start_str = start_dt.strftime("%Y%m%d")
+                end_str = end_dt.strftime("%Y%m%d")
+                filename = f"data/BTCUSDT_klines_5m_{start_str}_{end_str}.csv"
+                combined_df.to_csv(filename, index=False)
+                print(f"[Info] 데이터 저장 완료: {filename}")
+            return combined_df
+        else:
             return pd.DataFrame()
-            
+
     def validate_data(self, df: pd.DataFrame) -> bool:
         """데이터 유효성 검사"""
         if df.empty:
